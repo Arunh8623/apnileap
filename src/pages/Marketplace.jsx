@@ -344,7 +344,7 @@ export default function Marketplace() {
                     {/* Assign to spoke */}
                     {['open','assigned'].includes(project.status) && (
                       <button onClick={()=>{ setAssignModal(project); setAssignSpoke(project.assignedSpoke||''); }} className="btn btn-secondary" style={{ fontSize:11, padding:'5px 12px', justifyContent:'center' }}>
-                        <ArrowRight size:12/> {project.assignedSpoke ? 'Reassign' : 'Assign Spoke'}
+                        <ArrowRight size={12}/> {project.assignedSpoke ? 'Reassign' : 'Assign Spoke'}
                       </button>
                     )}
                     {/* Milestone payments */}
@@ -386,7 +386,7 @@ export default function Marketplace() {
                     )}
                     <button onClick={()=>handleDelete(project.id, project.title)} style={{ background:'transparent', border:'none', color:'var(--accent-rose)', cursor:'pointer', padding:'4px', textAlign:'center', fontSize:11, opacity:0.6 }}
                       onMouseEnter={e=>e.target.style.opacity='1'} onMouseLeave={e=>e.target.style.opacity='0.6'}>
-                      <Trash2 size:12/> Delete
+                      <Trash2 size={12}/> Delete
                     </button>
                   </div>
                 </div>
