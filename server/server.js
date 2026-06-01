@@ -892,9 +892,379 @@ cron.schedule('0 9 * * *', async () => {
   } catch (e) { console.error('[CRON] Error:', e.message); }
 });
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// COMPANY AUTH SYSTEM
+// Companies (Infosys, etc.) register, login, post projects
+// Stored in companies.json — no DB needed
+// ═══════════════════════════════════════════════════════════════════════════════
+const bcrypt    = require('bcryptjs');
+const jwt       = require('jsonwebtoken');
+const { v4: uuidv4 } = require('uuid');
+
+const COMPANIES_FILE   = './companies.json';
+const MARKETPLACE_FILE = './marketplace.json';
+const PAYMENTS_FILE    = './payments.json';
+const JWT_SECRET       = process.env.JWT_SECRET || 'apnileap-secret-2026';
+
+const readJSON  = (file, def = []) => { try { return fs.existsSync(file) ? JSON.parse(fs.readFileSync(file,'utf8')) : def; } catch { return def; } };
+const writeJSON = (file, data)     => fs.writeFileSync(file, JSON.stringify(data, null, 2));
+
+// ── Auth middleware ──────────────────────────────────────────────────────────
+const authMiddleware = (req, res, next) => {
+  const token = req.headers.authorization?.replace('Bearer ', '');
+  if (!token) return res.status(401).json({ error: 'No token provided' });
+  try {
+    req.company = jwt.verify(token, JWT_SECRET);
+    next();
+  } catch { res.status(401).json({ error: 'Invalid token' }); }
+};
+
+// ── Company Register ─────────────────────────────────────────────────────────
+app.post('/api/company/register', async (req, res) => {
+  try {
+    const { name, email, password, companyName, industry, website, contactPerson } = req.body;
+    if (!email || !password || !companyName) return res.status(400).json({ error: 'Email, password and company name required' });
+
+    const companies = readJSON(COMPANIES_FILE);
+    if (companies.find(c => c.email === email)) return res.status(400).json({ error: 'Email already registered' });
+
+    const hashed = await bcrypt.hash(password, 10);
+    const company = {
+      id: uuidv4(), name, email, password: hashed,
+      companyName, industry: industry || 'Technology',
+      website: website || '', contactPerson: contactPerson || name,
+      createdAt: new Date().toISOString(), verified: false,
+      projectsPosted: 0,
+    };
+    companies.push(company);
+    writeJSON(COMPANIES_FILE, companies);
+
+    const token = jwt.sign({ id: company.id, email, companyName, role: 'company' }, JWT_SECRET, { expiresIn: '7d' });
+    const { password: _, ...safe } = company;
+    res.json({ token, company: safe });
+  } catch (err) { handleError(res, err); }
+});
+
+// ── Company Login ─────────────────────────────────────────────────────────────
+app.post('/api/company/login', async (req, res) => {
+  try {
+    const { email, password } = req.body;
+    const companies = readJSON(COMPANIES_FILE);
+    const company = companies.find(c => c.email === email);
+    if (!company) return res.status(401).json({ error: 'Invalid email or password' });
+
+    const valid = await bcrypt.compare(password, company.password);
+    if (!valid) return res.status(401).json({ error: 'Invalid email or password' });
+
+    const token = jwt.sign({ id: company.id, email, companyName: company.companyName, role: 'company' }, JWT_SECRET, { expiresIn: '7d' });
+    const { password: _, ...safe } = company;
+    res.json({ token, company: safe });
+  } catch (err) { handleError(res, err); }
+});
+
+// ── Get company profile ───────────────────────────────────────────────────────
+app.get('/api/company/me', authMiddleware, (req, res) => {
+  const companies = readJSON(COMPANIES_FILE);
+  const company = companies.find(c => c.id === req.company.id);
+  if (!company) return res.status(404).json({ error: 'Company not found' });
+  const { password: _, ...safe } = company;
+  res.json(safe);
+});
+
+// ── List all companies (for hub admin) ───────────────────────────────────────
+app.get('/api/companies', (req, res) => {
+  const companies = readJSON(COMPANIES_FILE).map(({ password: _, ...c }) => c);
+  res.json(companies);
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// MARKETPLACE — Companies post projects, APNILEAP assigns to colleges
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// Post a new project opportunity (Company or Hub)
+app.post('/api/marketplace/projects', async (req, res) => {
+  try {
+    const {
+      title, description, requirements, budget, currency,
+      deadline, category, skills, milestones,
+      companyId, companyName, postedBy, // 'company' or 'hub'
+    } = req.body;
+
+    const projects = readJSON(MARKETPLACE_FILE);
+    const project = {
+      id: uuidv4(),
+      title, description, requirements: requirements || '',
+      budget: Number(budget) || 0,
+      currency: currency || 'INR',
+      deadline, category: category || 'Software Development',
+      skills: skills || [],
+      milestones: milestones || [],
+      companyId: companyId || 'hub',
+      companyName: companyName || 'APNILEAP Hub',
+      postedBy: postedBy || 'hub',
+      status: 'open', // open | assigned | in_progress | submitted | approved | completed
+      assignedSpoke: null,
+      assignedAt: null,
+      jiraEpicKey: null,
+      totalPaid: 0,
+      createdAt: new Date().toISOString(),
+    };
+    projects.push(project);
+    writeJSON(MARKETPLACE_FILE, projects);
+    res.json(project);
+  } catch (err) { handleError(res, err); }
+});
+
+// Get all marketplace projects
+app.get('/api/marketplace/projects', (req, res) => {
+  const { status, companyId, spoke } = req.query;
+  let projects = readJSON(MARKETPLACE_FILE);
+  if (status)    projects = projects.filter(p => p.status === status);
+  if (companyId) projects = projects.filter(p => p.companyId === companyId);
+  if (spoke)     projects = projects.filter(p => p.assignedSpoke === spoke);
+  res.json(projects.sort((a,b) => new Date(b.createdAt) - new Date(a.createdAt)));
+});
+
+// Get single project
+app.get('/api/marketplace/projects/:id', (req, res) => {
+  const projects = readJSON(MARKETPLACE_FILE);
+  const project = projects.find(p => p.id === req.params.id);
+  if (!project) return res.status(404).json({ error: 'Project not found' });
+  res.json(project);
+});
+
+// Assign project to a spoke (Hub admin action)
+app.put('/api/marketplace/projects/:id/assign', async (req, res) => {
+  try {
+    const { spokeKey, spokeName } = req.body;
+    const projects = readJSON(MARKETPLACE_FILE);
+    const idx = projects.findIndex(p => p.id === req.params.id);
+    if (idx === -1) return res.status(404).json({ error: 'Project not found' });
+
+    projects[idx].assignedSpoke = spokeKey;
+    projects[idx].assignedSpokeName = spokeName;
+    projects[idx].status = 'assigned';
+    projects[idx].assignedAt = new Date().toISOString();
+
+    // Also create a Jira Epic for tracking
+    try {
+      const body = {
+        fields: {
+          project: { key: process.env.JIRA_HUB_PROJECT_KEY || 'APNIHUB' },
+          summary: `[MARKETPLACE] ${projects[idx].title}`,
+          issuetype: { name: 'Epic' },
+          priority: { name: 'High' },
+          labels: [
+            'apnileap-work-package',
+            `assigned-to:${spokeKey}`,
+            'work-type:Marketplace-Project',
+            `marketplace-id:${req.params.id}`,
+          ],
+          description: {
+            type: 'doc', version: 1,
+            content: [{ type: 'paragraph', content: [{ type: 'text', text:
+              `Company: ${projects[idx].companyName}\nBudget: ₹${projects[idx].budget}\nDeadline: ${projects[idx].deadline}\n\n${projects[idx].description}`
+            }]}],
+          },
+        },
+      };
+      if (projects[idx].deadline) body.fields.duedate = projects[idx].deadline;
+      const r = await jira().post('/issue', body);
+      projects[idx].jiraEpicKey = r.data.key;
+
+      // Post assignment comment
+      await jira().post(`/issue/${r.data.key}/comment`, {
+        body: { type: 'doc', version: 1, content: [{ type: 'paragraph', content: [{ type: 'text', text:
+          `📋 APNILEAP Marketplace Assignment\n\nProject "${projects[idx].title}" has been assigned to ${spokeName} (${spokeKey}).\nCompany: ${projects[idx].companyName}\nBudget: ₹${projects[idx].budget}\nDeadline: ${projects[idx].deadline}\n\nPlease review requirements and begin planning.`
+        }]}]},
+      });
+    } catch (e) { console.error('[Marketplace] Jira Epic creation failed:', e.message); }
+
+    writeJSON(MARKETPLACE_FILE, projects);
+    res.json(projects[idx]);
+  } catch (err) { handleError(res, err); }
+});
+
+// Update project status
+app.put('/api/marketplace/projects/:id/status', (req, res) => {
+  try {
+    const { status } = req.body;
+    const projects = readJSON(MARKETPLACE_FILE);
+    const idx = projects.findIndex(p => p.id === req.params.id);
+    if (idx === -1) return res.status(404).json({ error: 'Not found' });
+    projects[idx].status = status;
+    projects[idx].updatedAt = new Date().toISOString();
+    writeJSON(MARKETPLACE_FILE, projects);
+    res.json(projects[idx]);
+  } catch (err) { handleError(res, err); }
+});
+
+// Delete project
+app.delete('/api/marketplace/projects/:id', (req, res) => {
+  try {
+    const projects = readJSON(MARKETPLACE_FILE);
+    writeJSON(MARKETPLACE_FILE, projects.filter(p => p.id !== req.params.id));
+    res.json({ success: true });
+  } catch (err) { handleError(res, err); }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// RAZORPAY — Milestone Payment Release
+// When hub approves a milestone → create Razorpay order → track payment
+// ═══════════════════════════════════════════════════════════════════════════════
+const Razorpay = require('razorpay');
+const crypto   = require('crypto');
+
+const getRazorpay = () => new Razorpay({
+  key_id:     process.env.RAZORPAY_KEY_ID,
+  key_secret: process.env.RAZORPAY_KEY_SECRET,
+});
+
+// Create Razorpay order for a milestone payment
+app.post('/api/payments/create-order', async (req, res) => {
+  try {
+    if (!process.env.RAZORPAY_KEY_ID) return res.status(400).json({ error: 'Razorpay not configured. Add RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET to .env' });
+
+    const { projectId, milestoneId, milestoneName, amount, currency, notes } = req.body;
+    if (!amount || amount <= 0) return res.status(400).json({ error: 'Invalid amount' });
+
+    const rzp = getRazorpay();
+    const order = await rzp.orders.create({
+      amount: Math.round(amount * 100), // Razorpay needs paise (1 INR = 100 paise)
+      currency: currency || 'INR',
+      receipt: `milestone_${milestoneId || uuidv4().substring(0,8)}`,
+      notes: {
+        projectId: projectId || '',
+        milestoneName: milestoneName || '',
+        platform: 'APNILEAP',
+        ...notes,
+      },
+    });
+
+    // Save to payments file
+    const payments = readJSON(PAYMENTS_FILE);
+    payments.push({
+      id: uuidv4(),
+      razorpayOrderId: order.id,
+      projectId, milestoneId, milestoneName,
+      amount, currency: currency || 'INR',
+      status: 'created',
+      createdAt: new Date().toISOString(),
+    });
+    writeJSON(PAYMENTS_FILE, payments);
+
+    res.json({
+      orderId:  order.id,
+      amount:   order.amount,
+      currency: order.currency,
+      keyId:    process.env.RAZORPAY_KEY_ID,
+    });
+  } catch (err) {
+    console.error('[Razorpay] Create order error:', err.message);
+    handleError(res, err);
+  }
+});
+
+// Verify payment signature after successful payment
+app.post('/api/payments/verify', (req, res) => {
+  try {
+    const { razorpay_order_id, razorpay_payment_id, razorpay_signature, projectId, milestoneId } = req.body;
+
+    const body = razorpay_order_id + '|' + razorpay_payment_id;
+    const expected = crypto.createHmac('sha256', process.env.RAZORPAY_KEY_SECRET || '')
+      .update(body).digest('hex');
+
+    if (expected !== razorpay_signature) {
+      return res.status(400).json({ success: false, error: 'Invalid payment signature' });
+    }
+
+    // Update payment record
+    const payments = readJSON(PAYMENTS_FILE);
+    const idx = payments.findIndex(p => p.razorpayOrderId === razorpay_order_id);
+    if (idx !== -1) {
+      payments[idx].status = 'paid';
+      payments[idx].razorpayPaymentId = razorpay_payment_id;
+      payments[idx].paidAt = new Date().toISOString();
+      writeJSON(PAYMENTS_FILE, payments);
+
+      // Update project totalPaid
+      if (projectId) {
+        const projects = readJSON(MARKETPLACE_FILE);
+        const pidx = projects.findIndex(p => p.id === projectId);
+        if (pidx !== -1) {
+          projects[pidx].totalPaid = (projects[pidx].totalPaid || 0) + payments[idx].amount;
+          writeJSON(MARKETPLACE_FILE, projects);
+        }
+      }
+    }
+
+    // Post confirmation to Jira if we have the epic key
+    if (projectId) {
+      const projects = readJSON(MARKETPLACE_FILE);
+      const project = projects.find(p => p.id === projectId);
+      if (project?.jiraEpicKey) {
+        jira().post(`/issue/${project.jiraEpicKey}/comment`, {
+          body: { type: 'doc', version: 1, content: [{ type: 'paragraph', content: [{ type: 'text', text:
+            `💳 APNILEAP Payment Released\n\nMilestone: ${milestoneId || 'Payment'}\nAmount: ₹${payments[idx]?.amount || 0}\nRazorpay Payment ID: ${razorpay_payment_id}\nStatus: PAID ✅\n\n— APNILEAP Finance Gateway`
+          }]}]},
+        }).catch(() => {});
+      }
+    }
+
+    res.json({ success: true, paymentId: razorpay_payment_id });
+  } catch (err) { handleError(res, err); }
+});
+
+// Get all payments
+app.get('/api/payments', (req, res) => {
+  const { projectId } = req.query;
+  let payments = readJSON(PAYMENTS_FILE);
+  if (projectId) payments = payments.filter(p => p.projectId === projectId);
+  res.json(payments.sort((a,b) => new Date(b.createdAt) - new Date(a.createdAt)));
+});
+
+// Razorpay webhook (for production — Render URL required)
+app.post('/api/payments/webhook', (req, res) => {
+  try {
+    const sig = req.headers['x-razorpay-signature'];
+    const body = JSON.stringify(req.body);
+    const expected = crypto.createHmac('sha256', process.env.RAZORPAY_WEBHOOK_SECRET || '')
+      .update(body).digest('hex');
+
+    if (sig !== expected) return res.status(400).json({ error: 'Invalid webhook signature' });
+
+    const { event, payload } = req.body;
+    console.log(`[Razorpay Webhook] Event: ${event}`);
+
+    if (event === 'payment.captured') {
+      const payment = payload.payment.entity;
+      const payments = readJSON(PAYMENTS_FILE);
+      const idx = payments.findIndex(p => p.razorpayOrderId === payment.order_id);
+      if (idx !== -1) {
+        payments[idx].status = 'paid';
+        payments[idx].razorpayPaymentId = payment.id;
+        payments[idx].paidAt = new Date().toISOString();
+        writeJSON(PAYMENTS_FILE, payments);
+      }
+    }
+    res.json({ status: 'ok' });
+  } catch (err) { console.error('[Webhook]', err.message); res.status(500).json({ error: err.message }); }
+});
+
+// Payment stats
+app.get('/api/payments/stats', (req, res) => {
+  const payments = readJSON(PAYMENTS_FILE);
+  const total     = payments.reduce((s,p) => s + (p.amount||0), 0);
+  const paid      = payments.filter(p => p.status==='paid').reduce((s,p) => s + (p.amount||0), 0);
+  const pending   = payments.filter(p => p.status!=='paid').reduce((s,p) => s + (p.amount||0), 0);
+  res.json({ total, paid, pending, count: payments.length, paidCount: payments.filter(p=>p.status==='paid').length });
+});
+
+
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
   console.log(`🚀 APNILEAP Backend running on port ${PORT}`);
-  console.log(`   Jira: ${JIRA_BASE}`);
-  console.log(`   AI:   ${process.env.GEMINI_API_KEY ? '✓ Gemini key set' : '✗ no key (add GEMINI_API_KEY to .env)'}`);
+  console.log(`   Jira:     ${JIRA_BASE}`);
+  console.log(`   AI:       ${process.env.GEMINI_API_KEY ? '✓ Gemini' : '✗ no Gemini key'}`);
+  console.log(`   Razorpay: ${process.env.RAZORPAY_KEY_ID ? '✓ configured' : '✗ add RAZORPAY_KEY_ID to .env'}`);
 });

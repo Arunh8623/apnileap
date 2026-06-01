@@ -87,3 +87,23 @@ export const saveRoles = (data) => api.post('/roles', data);
 
 // Milestones
 export const getMilestones = () => api.get('/milestones');
+
+// Company Auth
+export const companyRegister = (data) => api.post('/company/register', data);
+export const companyLogin = (data) => api.post('/company/login', data);
+export const getCompanyProfile = () => api.get('/company/me');
+export const getCompanies = () => api.get('/companies');
+
+// Marketplace
+export const getMarketplaceProjects = (params) => api.get('/marketplace/projects', { params });
+export const getMarketplaceProject = (id) => api.get(`/marketplace/projects/${id}`);
+export const postMarketplaceProject = (data) => api.post('/marketplace/projects', data);
+export const assignMarketplaceProject = (id, data) => api.put(`/marketplace/projects/${id}/assign`, data);
+export const updateProjectStatus = (id, status) => api.put(`/marketplace/projects/${id}/status`, { status });
+export const deleteMarketplaceProject = (id) => api.delete(`/marketplace/projects/${id}`);
+
+// Payments
+export const createPaymentOrder = (data) => api.post('/payments/create-order', data);
+export const verifyPayment = (data) => api.post('/payments/verify', data);
+export const getPayments = (params) => api.get('/payments', { params });
+export const getPaymentStats = () => api.get('/payments/stats');
